@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Bio-Ribs 3.5: Biomechanical Simulation Engine</title>
+    <style>
+        body { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #050505; color: #888; font-family: 'Inter', sans-serif; overflow: hidden; }
+        canvas { background: #080808; border-radius: 50%; box-shadow: 0 0 80px rgba(0,255,204,0.2); cursor: crosshair; border: 1px solid #1a1a1a; }
+        .ui { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; background: #111; padding: 20px; border-radius: 20px; width: 700px; border: 1px solid #222; }
+        .control-group { display: flex; flex-direction: column; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+        label { font-size: 9px; color: #555; letter-spacing: 1px; text-transform: uppercase; }
+        span { color: #00ffcc; font-family: monospace; font-size: 11px; }
+        input[type=range] { width: 100%; accent-color: #00ffcc; cursor: pointer; height: 3px; background: #222; }
+        .full-row { grid-column: span 3; }
+        .btn-group { grid-column: span 3; display: flex; gap: 8px; justify-content: center; padding-top: 12px; border-top: 1px solid #222; }
+        button { background: #111; color: #00ffcc; border: 1px solid #333; padding: 6px 15px; border-radius: 20px; cursor: pointer; font-size: 10px; transition: 0.3s; }
+    </style>
+</head>
+<body>
+
+<canvas id="canvas" width="560" height="560"></canvas>
+
+<div class="ui">
+    <div class="control-group"><div class="header"><label>底盘宽度 (Base W)</label><span id="wVal">300</span></div><input type="range" id="baseW" min="150" max="420" value="300"></div>
+    <div class="control-group"><div class="header"><label>初始高度 (Height)</label><span id="hVal">150</span></div><input type="range" id="apexH" min="50" max="220" value="150"></div>
+    <div class="control-group"><div class="header"><label>组织硬度 (Stiffness)</label><span id="sVal">0.0050</span></div><input type="range" id="stiffness" min="0.0040" max="0.0150" step="0.0001" value="0.0050"></div>
+    
+    <div class="control-group"><div class="header"><label>运动阻尼 (Damping)</label><span id="dVal">0.750</span></div><input type="range" id="damping" min="0.70" max="0.80" step="0.005" value="0.750"></div>
+    <div class="control-group"><div class="header"><label>饱满度 (Fullness)</label><span id="fVal">0.55</span></div><input type="range" id="fullness" min="0.20" max="0.90" step="0.01" value="0.55"></div>
+    <div class="control-group"><div class="header"><label>悬韧带张力 (Ligament)</label><span id="lVal">0.60</span></div><input type="range" id="ligament" min="0.0" max="1.0" step="0.01" value="0.60"></div>
+
+    <div class="control-group full-row"><div class="header"><label>姿态旋转 (Rotation)</label><span id="rVal">0°</span></div><input type="range" id="rotation" min="0" max="360" value="0"></div>
+
+    <div class="btn-group">
+        <button onclick="hardReset()">RESET SYSTEM / 全局重置</button>
+        <button style="color:#ffcc00" onclick="saveData()">SAVE / 存档</button>
+        <button style="color:#ffcc00" onclick="loadData()">LOAD / 读档</button>
+    </div>
+</div>
+
+<script>
+    /* * ==========================================================================
+     * 🚀 BIO-RIBS SIMULATION ENGINE v3.5
+     * --------------------------------------------------------------------------
+     * DESIGN & CORE LOGIC BY: Dashendemao (大神的毛)
+     * LICENSE: CC BY-NC-SA 4.0 (署名-非商业性使用-相同方式共享 4.0 国际)
+     * --------------------------------------------------------------------------
+     * ⚠️ LEGAL NOTICE / 法律声明:
+     * This software utilizes a proprietary finite-element rib structure designed
+     * by Dashendemao to simulate biological soft tissue dynamics.
+     * * 1. NON-COMMERCIAL: You may NOT use this code, its logic, or derivatives
+     * for any commercial purposes, products, or services.
+     * 2. ATTRIBUTION: Any public use or fork must clearly credit "Dashendemao".
+     * 3. SHARE-ALIKE: If you modify this code, you must distribute it under the
+     * same CC BY-NC-SA 4.0 license.
+     * ========================================================================== */
+
+    const canvas = document.getElementById('canvas'), ctx = canvas.getContext('2d');
+    const centerX = 280, centerY = 280;
+    const RIB_COUNT = 40;
+    const LIMITS = { stretch: 1.45, dragCap: 1.43, squash: 0.15, g: 1.1 };
+    const DEFAULTS = { baseW: 300, apexH: 150, stiff: 0.005, damp: 0.75, baseF: 0.55, ligament: 0.6, rot: 0 };
+
+    let baseW, restH, baseF, stiff, damp, rot, ligament;
+    let ribs = [], targetArea = 0, isDrag = false;
+
+    const el = (id) => document.getElementById(id);
+
+    function hardReset() {
+        baseW = DEFAULTS.baseW; restH = DEFAULTS.apexH; stiff = DEFAULTS.stiff;
+        damp = DEFAULTS.damp; baseF = DEFAULTS.baseF; ligament = DEFAULTS.ligament; rot = DEFAULTS.rot;
+        el('baseW').value = baseW; el('apexH').value = restH; el('stiffness').value = stiff;
+        el('damping').value = damp; el('fullness').value = baseF; el('ligament').value = ligament;
+        el('rotation').value = rot;
+        initRibs();
+    }
+
+    function initRibs() {
+        ribs = []; targetArea = 0;
+        for(let i=0; i<=RIB_COUNT; i++) {
+            let x = (i / RIB_COUNT - 0.5) * baseW;
+            let h = Math.pow(Math.sin((i / RIB_COUNT) * Math.PI), 1.5 - baseF) * restH;
+            ribs.push({ x: x, y: -h, restY: -h, velY: 0, lean: 0, velLean: 0 });
+            targetArea += h;
+        }
+        updateUI();
+    }
+
+    const updateUI = () => {
+        el('wVal').innerText = baseW; el('hVal').innerText = restH;
+        el('sVal').innerText = stiff.toFixed(4); el('dVal').innerText = damp.toFixed(3);
+        el('fVal').innerText = baseF.toFixed(2); el('lVal').innerText = ligament.toFixed(2);
+        el('rVal').innerText = rot + "°";
+    };
+
+    el('baseW').oninput = (e) => { baseW = parseFloat(e.target.value); initRibs(); };
+    el('apexH').oninput = (e) => { restH = parseFloat(e.target.value); initRibs(); };
+    el('stiffness').oninput = (e) => { stiff = parseFloat(e.target.value); updateUI(); };
+    el('damping').oninput = (e) => { damp = parseFloat(e.target.value); updateUI(); };
+    el('fullness').oninput = (e) => { baseF = parseFloat(e.target.value); initRibs(); };
+    el('ligament').oninput = (e) => { ligament = parseFloat(e.target.value); updateUI(); };
+    el('rotation').oninput = (e) => rot = parseInt(e.target.value);
+
+    window.saveData = () => { localStorage.setItem('bio_v35_d', JSON.stringify({baseW, restH, baseF, stiff, damp, rot, ligament})); alert("Config Saved!"); };
+    window.loadData = () => {
+        const d = JSON.parse(localStorage.getItem('bio_v35_d'));
+        if(d) {
+            baseW=d.baseW; restH=d.restH; baseF=d.baseF; stiff=d.stiff; damp=d.damp; rot=d.rot; ligament=d.ligament;
+            el('baseW').value=baseW; el('apexH').value=restH; el('fullness').value=baseF; el('stiffness').value=stiff; 
+            el('damping').value=damp; el('rotation').value=rot; el('ligament').value=ligament;
+            initRibs();
+        }
+    };
+
+    function draw() {
+        ctx.clearRect(0,0,560,560);
+        const rad = rot * Math.PI / 180;
+        const gy_world = LIMITS.g * 10;
+
+        if(!isDrag) {
+            const gx = Math.sin(rad) * gy_world;
+            const gy = Math.cos(rad) * gy_world;
+            let peakShift = (1.0 - ligament) * (gx / gy_world) * 0.45;
+
+            ribs.forEach((r, i) => {
+                let ratio = i / RIB_COUNT;
+                let shiftedRatio = ratio - peakShift;
+                let hBase = Math.max(0, Math.pow(Math.sin(Math.min(Math.max(shiftedRatio, 0), 1) * Math.PI), 1.5 - baseF) * restH);
+                
+                let fY = ((-hBase) - r.y) * stiff * 50 + gy;
+                r.velY += fY; r.velY *= damp; r.y += r.velY;
+                let fLean = (0 - r.lean) * 0.15 + gx * 0.85;
+                r.velLean += fLean; r.velLean *= damp; r.lean += r.velLean;
+
+                if (r.y > -restH * LIMITS.squash) r.y = -restH * LIMITS.squash;
+                if (r.y < -restH * LIMITS.stretch) r.y = -restH * LIMITS.stretch;
+            });
+
+            for(let step=0; step<5; step++) {
+                for(let i=1; i<RIB_COUNT; i++) {
+                    ribs[i].y += ((ribs[i-1].y + ribs[i+1].y) / 2 - ribs[i].y) * 0.4;
+                    ribs[i].lean += ((ribs[i-1].lean + ribs[i+1].lean) / 2 - ribs[i].lean) * 0.3;
+                }
+            }
+        }
+
+        ctx.save();
+        ctx.translate(centerX, centerY); ctx.rotate(rad);
+
+        ctx.beginPath();
+        ctx.lineWidth = 4; ctx.strokeStyle = "#00ffcc";
+        ctx.moveTo(ribs[0].x, 0);
+        for (let i = 0; i < ribs.length - 1; i++) {
+            let xc = (ribs[i].x + ribs[i].lean + ribs[i+1].x + ribs[i+1].lean) / 2;
+            let yc = (ribs[i].y + ribs[i+1].y) / 2;
+            ctx.quadraticCurveTo(ribs[i].x + ribs[i].lean, ribs[i].y, xc, yc);
+        }
+        ctx.lineTo(ribs[RIB_COUNT].x, 0); ctx.closePath();
+
+        const g = ctx.createRadialGradient(0, -restH/2, 0, 0, -restH/2, restH * 2);
+        g.addColorStop(0, "rgba(0, 255, 204, 0.22)"); g.addColorStop(1, "rgba(0, 255, 204, 0)");
+        ctx.fillStyle = g; ctx.fill(); ctx.stroke();
+        
+        // --- Dashendemao 专属水印 ---
+        ctx.save();
+        ctx.font = "10px Inter, monospace";
+        ctx.fillStyle = "rgba(0, 255, 204, 0.15)"; // 极低透明度，不干扰视觉
+        ctx.textAlign = "right";
+        ctx.fillText("© Bio-Ribs Engine v3.5 | Designed by Dashendemao", baseW/2 + 20, restH * LIMITS.stretch + 40);
+        ctx.restore();
+        
+        ctx.restore();
+        updateUI();
+        requestAnimationFrame(draw);
+    }
+
+    canvas.onmousedown = () => isDrag = true;
+    window.onmouseup = () => isDrag = false;
+    window.onmousemove = (e) => {
+        if(isDrag){
+            const r = canvas.getBoundingClientRect();
+            let mx = (e.clientX-r.left-centerX)/0.8, my = (e.clientY-r.top-centerY)/0.8;
+            let inv = -rot * Math.PI / 180;
+            let lx = mx * Math.cos(inv) - my * Math.sin(inv);
+            let ly = mx * Math.sin(inv) + my * Math.cos(inv);
+            ribs.forEach((rib) => {
+                let dist = Math.abs(rib.x - lx);
+                let influence = Math.exp(-Math.pow(dist / (baseW * 0.3), 2));
+                let targetY = Math.max(Math.min(ly, -restH * LIMITS.squash), -restH * LIMITS.dragCap);
+                let edgeW = Math.sin((rib.x / baseW + 0.5) * Math.PI);
+                rib.y = targetY * influence * edgeW + rib.y * (1 - influence * edgeW);
+                rib.lean = (lx - rib.x) * influence * 0.5 + rib.lean * (1 - influence * 0.5);
+                rib.velY = 0; rib.velLean = 0;
+            });
+        }
+    };
+
+    hardReset(); draw();
+</script>
+</body>
+</html>
